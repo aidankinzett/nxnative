@@ -8,6 +8,7 @@ void dm_guest_write_prepare(void *p, size_t n) { (void)p; (void)n; writes++; }
 static int checks, failed;
 #define CHECK(c) do { checks++; if (!(c)) { failed++; fprintf(stderr, "failed line %d: %s\n", __LINE__, #c); } } while (0)
 
+int nvn_fps_high_now(void) { return 60; }   // hle_nvn.c; the 120 fps mode is not under test here
 int main(int argc, char **argv) {
     if (argc != 4) return 2;
     if (!strcmp(argv[1], "unset")) unsetenv("DM_DYNAMIC_RESOLUTION"); else setenv("DM_DYNAMIC_RESOLUTION", argv[1], 1);

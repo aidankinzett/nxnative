@@ -14,12 +14,14 @@
 #   extract/v<version>/RomFS.img   its RomFS as one image (dm/tools/romfs_image.py: the host's DM_ROMFS, the IPA's romfs.img)
 #   aoc/<index>.img   each DLC's RomFS (index = DLC title ID − base title ID − 0x1000), the host's DM_AOC_DIR
 # A dump has no control data, so there is no control.nacp or icon.jpg beside them, as there is after nx_extract.
+# A NUP file (one file holding base, updates and add-ons, android/NUP.md) stands for such a folder: its base, update/<version> and addon/<title ID> packages are
+# read in place (dm/tools/nup.py through romfs.py) as base/, updates/<version>/ and dlc/<title ID>/<n>/ are, and the build folder goes beside it.
 # The title ID is the program ID in main.npdm. A repeat run keeps code modules that are the same and an image whose source tree, packer and image are unchanged (romfs_image.py --reuse).
-# Usage: pack_dump.py <dump folder> [--version N] [--work-dir DIR]   (exit 1 on error)
+# Usage: pack_dump.py <dump folder | .nup file> [--version N] [--work-dir DIR]   (exit 1 on error)
 import argparse, filecmp, shutil, struct, subprocess, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'dm/tools'))
-import romfs_image
+import nup, romfs, romfs_image
 
 
 class Error(Exception): pass
@@ -33,13 +35,20 @@ def program_id(npdm):   # the ACI0 program ID of main.npdm
     return struct.unpack_from('<Q', d, off + 0x10)[0]
 
 
-def clone(src, dst):   # an APFS clone on the same volume, else a copy
-    if subprocess.run(['cp', '-c', src, dst], capture_output=True).returncode != 0: shutil.copy2(src, dst)
+def in_nup(p): return nup.split(p) is not None   # a path inside a NUP file (romfs.Path), read through romfs.py
+
+
+def clone(src, dst):   # an APFS clone on the same volume, else a copy; a file of a NUP package is written out
+    if in_nup(src): dst.write_bytes(src.read_bytes())
+    elif subprocess.run(['cp', '-c', src, dst], capture_output=True).returncode != 0: shutil.copy2(src, dst)
+
+
+def same(f, d): return d.is_file() and (f.read_bytes() == d.read_bytes() if in_nup(f) else filecmp.cmp(f, d, shallow=False))
 
 
 def exefs(src, dst):
     files = sorted(f for f in src.iterdir() if f.is_file() and not f.name.startswith('.'))
-    if dst.is_dir() and {f.name for f in files} == {f.name for f in dst.iterdir()} and all(filecmp.cmp(f, dst / f.name, shallow=False) for f in files): return
+    if dst.is_dir() and {f.name for f in files} == {f.name for f in dst.iterdir()} and all(same(f, dst / f.name) for f in files): return
     tmp = dst.with_name(dst.name + '.partial')
     shutil.rmtree(tmp, ignore_errors=True); tmp.mkdir(parents=True)
     for f in files: clone(f, tmp / f.name)

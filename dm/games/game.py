@@ -213,6 +213,23 @@ def header_one(g):
     if pm not in ('follow', 'boost'): sys.exit(f'{g.id}: perf_mode must be follow or boost: {pm}')
     dmo = g.get('depth_mode', 'gl')   # the NVN depth mode the game sets, for the pipeline archive made offline (dm/gfx/tools/pso_offline.py; the host follows the game at run time): gl / zero
     if dmo not in ('gl', 'zero'): sys.exit(f'{g.id}: depth_mode must be gl or zero: {dmo}')
+    wfn = []   # window size getters, one row per main build: <main build ID> <width fn> <height fn> <the game's own WxH> (loader.c window_apply; DM_WINDOW_SIZE=WxH sets the size, unset = the game's own)
+    if g.get('window_fn', ''):
+        for r in g.values('window_fn'):
+            if len(r) != 4 or not re.fullmatch(r'[0-9a-f]{32}', r[0]) or not all(re.fullmatch(r'0x[0-9a-fA-F]+', x) for x in r[1:3]) or not re.fullmatch(r'\d{1,5}x\d{1,5}', r[3]):
+                sys.exit(f"{g.id}: window_fn takes <main build ID (32 hex)> <width function offset> <height function offset> <the game's own WxH>: {r}")
+            w, h = map(int, r[3].split('x'))
+            if not (0 < w < 65536 and 0 < h < 65536): sys.exit(f'{g.id}: window_fn size must be 1..65535 each: {r[3]}')
+            wfn.append('{' + q(r[0]) + f', {r[1]}, {r[2]}, {w}, {h}' + '}')
+    # Game resolution by the Switch 2 graphics scale (the Android launcher, build.gradle resolutionOf; the host reads DM_GRAPHICS_SCALE and DM_OPMODE, nothing is generated):
+    # <the launcher's choice: WxH or original> <scale 0|1|2> <console|handheld>, for a game that sizes its scenes by the scale rather than its window
+    if g.get('graphics_scale', ''):
+        seen = set()
+        for r in g.values('graphics_scale'):
+            if len(r) != 3 or not re.fullmatch(r'\d{1,5}x\d{1,5}|original', r[0]) or r[1] not in ('0', '1', '2') or r[2] not in ('console', 'handheld') or r[0] in seen:
+                sys.exit(f'{g.id}: graphics_scale takes <WxH | original> <scale 0|1|2> <console | handheld>, one row per choice: {r}')
+            seen.add(r[0])
+        if wfn: sys.exit(f'{g.id}: graphics_scale and window_fn are two levers for one setting: keep one')
     api = g.get('device_api', '55.15')   # the NVN API major.minor version nvnDeviceGetInteger reports (hle_nvn.c)
     if not re.fullmatch(r'\d+\.\d+', api): sys.exit(f'{g.id}: device_api must be major.minor: {api}')
     src = f'dm/games/{g.id}' if g.dir.parent == HERE else str(g.dir)
@@ -235,6 +252,7 @@ def header_one(g):
          f'#define DM_GAME_ARGS {q(g.get("game_args", ""))}',   # game arguments when the command line gives none (main.c; Octopath Traveler 0: Unreal's -SwitchVirtualAddressSpaceSize=)
          f'#define DM_GAME_ENV {q(g.get("game_env", ""))}',   # KEY=VALUE pairs getenv answers (hle_os.c; Absolum: .NET's DOTNET_GCRegionRange)
          f'#define DM_GAME_LAUNCH_PARAM {q(g.get("launch_param", ""))}',   # what oe::TryPopLaunchParameter hands over once (hle_oe.c; a program another program of the application launches: Super Mario 3D All-Stars)
+         f'#define DM_GAME_FASTBOOT_ENV {q(g.get("fastboot_env", ""))}',   # KEY=VALUE host switches DM_FASTBOOT=1 sets for a test run (main.c fastboot_apply; the environment and env.txt win)
          f'#define DM_GAME_MEM_MAP_LIMIT {int(mml == "on")}',
          f'#define DM_GAME_STDALLOC_CAP {int(g.get("stdalloc_cap", "0"), 0):#x}ull',   # StandardAllocator's address space with virtual address memory (hle_svc.c); 0 = what the alias region has room for
          f'#define DM_GAME_SCREEN_ASPECT {("off", "on").index(g.get("screen_aspect", "off"))}',   # stubs that follow a screen taller than 16:9 (DM_SCREEN_ASPECT): off / on
@@ -262,6 +280,7 @@ def header_one(g):
          f'#define DM_GAME_GPU_TS_SEGMENT {int(gts == "segment")}',
          f'#define DM_GAME_UPSCALER_KEYS {q(",".join(ups))}', f'#define DM_GAME_UPSCALER_N {len(ups)}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
+         f'#define DM_GAME_WINDOW_FN {{{", ".join(wfn) or "{\"\", 0, 0, 0, 0}"}}}', f'#define DM_GAME_NWINDOW_FN {len(wfn)}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)
          '']
     return '\n'.join(L)

@@ -2,6 +2,7 @@
 // On the real device each goes through IPC or a system applet; the host gives results as single-player offline. Pure-computation SDK parts (hash, util, software Opus) are not taken over, the original implementation is used directly.
 #include "hle.h"
 #include <dirent.h>
+#include <pthread.h>
 
 // ---------- aoc add-on content (the DLC NSPs in the player's folder) / ec shop (excluded) ----------
 // Owned add-on content indices (ascending), fixed at the first query:

@@ -54,11 +54,15 @@
 # Usage: shader_split.py <RomFS dir> <ExeFS main> <output package dir> <output map> <output answer table> [<output pair table> [<output pipeline pair table (pso_pairs.tsv)> [<DLC RomFS dirs, comma-separated>]]]   Environment J=concurrency (default 8)
 #   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
 #   Unity type trees need Unity's common string table, which is taken from the first main
+#   A RomFS or main may be in a NUP file (android/NUP.md): `game.nup:update/458752/romfs` and `game.nup:update/458752/exefs/main`, read in place through romfs.py; a RomFS given
+#   as `game.nup` or `game.nup:<selector>` is that package's romfs (the highest update's, else the base's, for a bare file)
+#   Environment DM_SPLIT_RESUME=<dir>: the scan resumes by file (ScanCache): a split stopped part way (the phone's thermal or battery pauses, a kill, a reboot) scans again only the files it had not finished
 # Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
 import base64, collections, concurrent.futures as cf, glob, hashlib, json, os, re, struct, subprocess, sys, time, zlib
 from typing import NoReturn
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open, is_image
+import nup
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../games')); import game as _game
 from profile_guess import glsl_sources
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import uepak
@@ -66,7 +70,8 @@ GAME = _game.load()   # the current game profile (DM_GAME, required): source gro
 GROUPS, NOTE = GAME.pairs('shader_groups'), GAME.get('shader_note')
 KEY_SKIP = tuple(int(x, 0) for x in GAME.get('shader_key_skip', '0+0').split('+'))   # control bytes the keys hash as zeros (key_ctl); dm/games/game.py checks the form
 # The sources are what the game files hold, with no profile switch: GLSLC outputs in main (glslc_shaders), the outputs the game compiles at run time when a capture is there (DM_GLSLC_CAPTURE,
-# hle_glslc.c), the shader code archives of Unreal paks once decoded on the Mac (uepak.py, DM_OODLE_JOB, hle_oodle.c); the NSP script decides from the files which of the last two to make
+# hle_glslc.c), the shader code archives of Unreal paks once decoded on the Mac (uepak.py, DM_OODLE_JOB, hle_oodle.c), the NSP script deciding from the files which of these two to make; and shaders the
+# host saved when the map did not have them (DM_NVN_SHDUMP, read from <version dir>/nvn_shdump or DM_NVN_SHDUMP_DIR: nvn_dumps)
 
 CTL_MAGIC, GFX_MAGIC, CS_MAGIC = bytes.fromhex('34127698'), bytes.fromhex('78563412'), bytes.fromhex('79563412')
 STAGES = ['vs', 'hs', 'ds', 'gs', 'ps', 'cs']
@@ -159,6 +164,7 @@ def bnsh_shaders(d, base, label):
             ctl, code = span(d, base + pctl, nctl, f'{where} variation {v} {st} control section'), span(d, base + pcode, ncode, f'{where} variation {v} {st} code area')
             why = check(label, st, ctl, code)
             if why: red(f'{label} BNSH @{base:#x} variation {v} {st}: {why}')
+            if nvn2_ctl(ctl) and len(ctl) > 0x56 and NVN2_CTL_STAGE.get(ctl[0x56]) in ('ts', 'ms'): st = NVN2_CTL_STAGE[ctl[0x56]]   # filed in a graphics slot
             out.append((f'{label}#BNSH@{base:#x}#var{v}', st, ctl, code))
     return out
 
@@ -260,11 +266,13 @@ def bahs_variations(d, label, entries):
         bases.append(base); q += rs
     if q != o + psz: return
     bases.append(acnt)
+    # NVN2 kinds 4 (task) and 5 (mesh) pair the same way: Mario Kart World 1.8.0's DrivePassShaderDefault.sharcb holds its programs as (fragment, task, mesh) or
+    # (fragment, mesh) per variation, which var_pairs turns into task -> mesh and mesh -> fragment pairs (the mesh's per-primitive outputs, mesh_facts)
     for p in range(pcnt):
-        seen = [0, 0]
+        seen = collections.Counter()
         for i in range(bases[p], bases[p + 1]):
             a, k = recs[i]
-            if k > 1: continue   # compute and the other kinds pair with nothing
+            if k not in (0, 1, 4, 5): continue   # compute and the other kinds pair with nothing
             if a in taken: BAHS_VAR[f'{label}#BAHS@{a:#x}'] = f'{label}#BAHS#prog{p}#var{seen[k]}'
             seen[k] += 1
 
@@ -284,6 +292,29 @@ def mshd_shaders(d, label):
         out.append((f'{label}#MSHD#var{len(out) // 2}', st, ctl, code))
         c = d.find(CTL_MAGIC, g + ncode)
     if len(out) % 2: red(f'{label} MSHD: {len(out)} stages, not in pairs')
+    return out
+
+def nvn_dumps(d, label='/nvn_shdump'):
+    """Shaders the host saved because the shader map did not have them (DM_NVN_SHDUMP=<dir>, nvn_mtl.m): <key>.ctl (the control section) + <key>.code (the code area), in folder d.
+    For a shader whose parts no reader here pairs: a game may assemble one at run time (switch2mac, MIT, azmasm/switch2mac: Mario Kart World's 321 "run-time" shaders, which turned out to be
+    agl BAHS programs bahs_shaders reads; runtime_shaders.py reports the NVN2 control sections no reader pairs, none on Mario Kart World 1.8.0). A saved shader whose bytes do not hash to its
+    file name was changed after the game bound it, and an NVN2 control section shorter than 0xd8 bytes (a host from before it saved the whole section) has no stage byte or thread group: both
+    are left out with a red line. The stage is the one the game files' copies get (nvn2_stage, sph_stage)"""
+    names = sorted(f[:-5] for f in os.listdir(d) if f.endswith('.code') and os.path.isfile(os.path.join(d, f[:-5] + '.ctl'))) if os.path.isdir(d) else []
+    out, bad = [], collections.Counter()
+    for k in names:
+        try:
+            with open(os.path.join(d, k + '.ctl'), 'rb') as f: ctl = f.read()
+            with open(os.path.join(d, k + '.code'), 'rb') as f: code = f.read()
+        except OSError: bad['a file that could not be read'] += 1; continue
+        nvn2 = nvn2_ctl(ctl)
+        if nvn2: ctl = ctl[:0xd8]
+        st = glslc_stage(ctl, code) if len(ctl) >= 0x24 else None   # NVN2's stage byte, or Maxwell's SPH, the compute magic or a headerless compute's thread group
+        why = ('an NVN2 control section of less than 0xd8 bytes' if nvn2 and len(ctl) < 0xd8 else 'no stage' if not st else check(label, st, ctl, code)
+               or ('bytes that do not hash to the file name' if skey(ctl, code) != k else None))
+        if why: bad[why] += 1; continue
+        out.append((f'{label}/{k}', st, ctl, code))
+    if names: print(f'{label}: {len(out)} of {len(names)} saved shaders taken' + ''.join(f'\n[RED] {label}: {n} with {w}, left out' for w, n in bad.items()), flush=True)
     return out
 
 def glslc_stage(ctl, code):
@@ -2316,12 +2347,17 @@ def unzs_dict(d, did, where):
     if did not in _ZD: _ZD[did] = zstd.ZstdDict(ZDICTS[did])
     return zstd.decompress(d, zstd_dict=_ZD[did])
 
+import shutil
+_ZSTD_CMD = shutil.which('zstd')
+
 def unzs(path):
     """A zstd file decompressed: frames without a dictionary through the zstd command as before (fed the bytes: inside a RomFS image the path is not a file the command can open),
     frames that name one with that dictionary from ZDICTS"""
     d = open(path, 'rb').read()
     did = zs_dict_id(d)
-    if not did: return subprocess.run(['zstd', '-d', '-c', '-q'], input=d, capture_output=True, check=True).stdout
+    if not did:
+        if _ZSTD_CMD: return subprocess.run([_ZSTD_CMD, '-d', '-c', '-q'], input=d, capture_output=True, check=True).stdout
+        return zstd_mod().decompress(d)   # no zstd command (the phone, android/ONDEVICE.md): the module, the same bytes
     return unzs_dict(d, did, path)
 
 def frame_size(f):
@@ -2677,6 +2713,47 @@ def ue_shaders(d, label):
         out.append((f'{label}#UE{i}', st, ctl, code))
     return out
 
+def mesh_facts(key, st, ctl, code, keys, mesh_pairs):
+    """The translator's layout of an NVN2 task / mesh program (dmsh_xlate job "mesh", Ryujinx StructuredIr/MeshShaderInfo.cs; after azmasm/switch2mac nx2_split.py, MIT):
+    "local" the workgroup (control +0x58 threads), "mesh" [max vertices (+0x60), max primitives (+0x62), task memory bytes (+0x5a), the per-vertex planes, then -1 and the
+    per-primitive values]. The planes come from the SPH's output map (byte 0x35 bits 4..7 position x y z w, from byte 0x36 the generic vectors, 4 bits each): code 0..3
+    position, 4 + 4 g + c generic g component c. The per-primitive values are the output map of the program's second header, at control +0x64 in the code area (0: none;
+    a geometry-type header, which NVK reads as a passthrough geometry stage's for per-primitive attributes; after pahorema/kartnative docs/reference/shaders-sm86.md, MIT).
+    The flat inputs (pixel SPH from byte 0x18, 2 bits per component, 1 = flat) of the pixel shaders its BAHS variation draws it with (var_pairs) that the mesh does not write
+    per vertex must be those values: Mario Kart World 1.8.0's 19 mesh programs agree; a difference is a red line. A task program has [0, 0, task memory bytes].
+    "pair": the mesh's pixel shaders / the task's mesh programs, for the library build"""
+    def warn(why):   # one program's layout not understood: a red line, and no layout (the translator then refuses it), not the end of the split
+        print(f'[RED] {st} program {key}: {why}', flush=True); return {'local': [max(threads, 1), 1, 1], 'shared': 0, 'pair': pairs}
+    threads, payload = struct.unpack_from('<HH', ctl, 0x58); maxv, maxp = struct.unpack_from('<HH', ctl, 0x60)
+    pairs = sorted(b for a, b, t in mesh_pairs if a == key)
+    if not threads: return warn('control +0x58 thread count is 0')
+    if st == 'ts': return {'local': [threads, 1, 1], 'shared': 0, 'mesh': [0, 0, payload], 'pair': pairs}
+    # the planes are counted from position and the generic vectors only: an output-map bit of another output (system values before position at 0x30..0x35 bits 0..3,
+    # colours / clip distances after the generics) would be a plane of its own and shift every one after it. None in Mario Kart World 1.8.0's 19 mesh programs
+    if any(code[0x30:0x35]) or code[0x35] & 0xf or any(code[0x46:0x50]): return warn('its SPH output map has outputs besides position and the generic vectors, whose planes are not known')
+    planes = [c for c in range(4) if code[0x35] >> (4 + c) & 1] + [4 + i for i in range(128) if code[0x36 + i // 8] >> (i % 8) & 1]
+    layout = [maxv, maxp, payload, *planes]
+    flats, reads = set(), set()
+    for ps in pairs:
+        pcode = keys[ps][3] if ps in keys else b''
+        if len(pcode) < 0x38: continue
+        imap = [(pcode[0x18 + i // 4] >> (i % 4 * 2)) & 3 for i in range(128)]
+        flats.add(tuple(4 + i for i in range(128) if imap[i] == 1 and 4 + i not in planes))
+        reads |= {i // 4 for i in range(128) if imap[i]}
+    if len(flats) > 1: print(f'[RED] mesh program {key}: its pixel shaders {pairs} differ in flat inputs, one per-primitive layout cannot serve them', flush=True)
+    second = struct.unpack_from('<I', ctl, 0x64)[0]
+    if second and len(code) < second + 0x50: return warn(f'control +0x64 {second:#x} is past its code area ({len(code):#x} bytes)')
+    h = code[second:second + 0x50] if second else bytes(0x50)
+    if any(h[0x30:0x35]) or h[0x35] & 0xf or any(h[0x46:0x50]): return warn('its per-primitive header has outputs besides position and the generic vectors')
+    prim = tuple(c for c in range(4) if h[0x35] >> (4 + c) & 1) + tuple(4 + i for i in range(128) if h[0x36 + i // 8] >> (i % 8) & 1)
+    if flats and next(iter(flats)) != prim: print(f'[RED] mesh program {key}: per-primitive values {list(prim)} (second header) are not the flat inputs {list(next(iter(flats)))} of its pixel shaders {pairs}', flush=True)
+    if prim: layout += [-1, *prim]
+    # -2: generic vectors the pixel shaders read that the mesh writes neither per vertex nor per primitive, given as (0, 0, 0, 1) like a vertex shader's padded outputs
+    have = {(c - 4) // 4 for c in planes + list(prim) if c >= 4}
+    pad = sorted(reads - have)
+    if pad: layout += [-2, *pad]
+    return {'local': [threads, 1, 1], 'shared': 0, 'mesh': layout, 'pair': pairs}
+
 def var_pairs(found):
     """(vertex key, pixel key) within the same BNSH variation; (vertex key, pixel key, 'prog') within the same BAHS program variation (bahs_variations).
     The tables stay separate; dmsh_build.py pads against both, as the pipeline prebuild uses both."""
@@ -2684,7 +2761,9 @@ def var_pairs(found):
     for where, st, ctl, code in found:
         g = where if '#var' in where else BAHS_VAR.get(where)
         if g: var[g][st] = skey(ctl, code)
-    return {(v['vs'], v['ps']) + (('prog',) if '#BAHS#prog' in g else ()) for g, v in var.items() if 'vs' in v and 'ps' in v}
+    out = {(v['vs'], v['ps']) + (('prog',) if '#BAHS#prog' in g else ()) for g, v in var.items() if 'vs' in v and 'ps' in v}
+    out |= {(v['ms'], v['ps'], 'mesh') for v in var.values() if 'ms' in v and 'ps' in v}   # NVN2 mesh -> pixel, task -> mesh (kept out of the vertex tables: mesh_facts)
+    return out | {(v['ts'], v['ms'], 'task') for v in var.values() if 'ts' in v and 'ms' in v}
 
 def scan_file(args):
     """→ (relative path, {key: …}, pairs, extra); extra = this file's Unity type trees, 'defer' (no type tree, scanned again in the second pass), or ('unreadable', why).
@@ -2842,17 +2921,165 @@ def scan_batch(jobs):   # scan_file over a batch of jobs, in a pool worker
     return [scan_file(j) for j in jobs]
 
 
-def pooled(ex, jobs, total, start=0, chunk=1):
+class InProcess:
+    """J=1: the pool's jobs run in this process, one after the other, no worker processes (the phone's packer runs in the app's process, which must not
+    fork: android/ONDEVICE.md); submit computes at once, map lazily"""
+    def __init__(self, initializer, initargs): initializer(*initargs)
+    def __enter__(self): return self
+    def __exit__(self, *exc): pass
+    def submit(self, fn, *a):
+        f = cf.Future()
+        try: f.set_result(fn(*a))
+        except BaseException as e: f.set_exception(e)
+        return f
+    def map(self, fn, it): return map(fn, it)
+
+def pool(J, *initargs):
+    """The scan's workers: J processes, or this process when J is 1 (InProcess)"""
+    return cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=initargs) if J > 1 else InProcess(_pool_init, initargs)
+
+class ScanCache:
+    """The scan's finished jobs kept in a folder (DM_SPLIT_RESUME), so a split stopped part way scans only the jobs it had not finished. The phone's split runs
+    for half an hour and is stopped often (thermal and battery pauses, Android ending the app, a reboot); without this, every stop started it over from 0.
+    Each flush writes the results finished since the last one as <n>.pkl ({job index: scan_file's result}) to a temporary name, synced, then renamed: a file is
+    there whole or not at all, and one that still does not load (a reboot before the rename reached the disk) is dropped and its jobs are scanned again. Files
+    are read back with ResultUnpickler, which builds only the types a scan result holds, so a file someone else put there cannot run code. The folder's 'digest'
+    names the inputs (scan_digest); another digest empties the folder first. The caller deletes the folder once the split's outputs are in place. With no folder
+    (d None), nothing is kept. The cache is a help, never a reason to fail: a folder that cannot be written (full, an I/O error) gives one red line, and the
+    split goes on without it"""
+    EVERY = 2.0   # seconds between flushes: a kill loses the results finished since the last flush (about 2 s of scanning, plus the batches in progress); an interrupt flushes first
+
+    def __init__(self, d, digest=''):
+        self.d, self.have, self.new, self.seq, self.last, self.checked = d, {}, {}, 0, time.monotonic(), False
+        if not d: return
+        try: self._open(d, digest)
+        except OSError as e: self._off(e)
+        if self.have: print(f'resuming the split: {len(self.have)} file(s) already scanned ({d})', flush=True)
+
+    def _open(self, d, digest):
+        os.makedirs(d, exist_ok=True)
+        dg = os.path.join(d, 'digest')
+        old = None
+        if os.path.isfile(dg):
+            with open(dg) as f: old = f.read().strip()
+        if old != digest:
+            for f in os.listdir(d): _remove(os.path.join(d, f))
+            self._write('digest', digest.encode())
+            return
+        for f in os.listdir(d):
+            stem, ext = os.path.splitext(f)
+            if ext != '.pkl' or not stem.isdigit():
+                if f != 'digest': _remove(os.path.join(d, f))   # a temporary file a stop left
+                continue
+            try:
+                with open(os.path.join(d, f), 'rb') as fh: part = ResultUnpickler(fh).load()
+                if not isinstance(part, dict) or not all(isinstance(k, int) for k in part): raise ValueError('not {job index: result}')
+            except Refused as e:   # a class the allow-list does not know: a planted file, or a result type ResultUnpickler must learn. Said, never silent
+                print(f'[RED] {os.path.join(d, f)}: {e}; the file is dropped and its files are scanned again', flush=True)
+                _remove(os.path.join(d, f)); continue
+            except Exception:   # cut by a reboot: its jobs are scanned again
+                _remove(os.path.join(d, f)); continue
+            self.have.update(part); self.seq = max(self.seq, int(stem) + 1)
+
+    def _off(self, e):
+        print(f'[RED] the split cannot keep its results in {self.d} ({e}): it goes on, but a stop will start it over', flush=True)
+        self.d, self.new = None, {}
+
+    def _write(self, name, data):
+        tmp = os.path.join(self.d, name + '.tmp')
+        with open(tmp, 'wb') as f:
+            f.write(data); f.flush(); os.fsync(f.fileno())
+        os.replace(tmp, os.path.join(self.d, name))
+
+    def add(self, first, results):   # the results of jobs first, first + 1, ...
+        if not self.d: return
+        for i, r in enumerate(results): self.new[first + i] = r
+        if time.monotonic() - self.last >= self.EVERY: self.flush()
+
+    def flush(self):
+        if self.d and self.new:
+            data = pickle.dumps(self.new, pickle.HIGHEST_PROTOCOL)
+            if not self.checked:   # the first write: a result type the allow-list refuses would make every kept file useless on reading; say which, keep nothing
+                try: ResultUnpickler(__import__('io').BytesIO(data)).load()
+                except Refused as e: self._off(f'{e}: ResultUnpickler.ALLOWED must take it'); return
+                self.checked = True
+            try: self._write(f'{self.seq}.pkl', data)
+            except OSError as e: self._off(e); return
+            self.have.update(self.new); self.new, self.seq = {}, self.seq + 1
+        self.last = time.monotonic()
+
+    def cached(self, first, n):   # the results of jobs first .. first + n - 1 when all of them are kept, else None
+        if not all(first + i in self.have for i in range(n)): return None
+        return [self.have[first + i] for i in range(n)]
+
+def _remove(p):   # a file, or a folder with what is in it
+    if os.path.isdir(p) and not os.path.islink(p): __import__('shutil').rmtree(p)
+    else: os.unlink(p)
+
+class Refused(pickle.UnpicklingError): pass   # ResultUnpickler: a class not on its allow-list
+
+class ResultUnpickler(pickle.Unpickler):
+    """Reads ScanCache's files, which may sit on shared storage (the phone's /storage/emulated/0) where other apps can write: it builds only the types a scan
+    result holds (dicts, tuples, sets, bytes, strings and numbers need no class; Unity type trees are unityfs.Node) and refuses any other, so a planted file
+    cannot name a function to call"""
+    ALLOWED = {('builtins', 'set'), ('builtins', 'frozenset'), ('builtins', 'bytearray'), ('unityfs', 'Node')}
+    def find_class(self, module, name):
+        if (module, name) not in self.ALLOWED: raise Refused(f'{module}.{name} is not a type a scan result holds')
+        return getattr(__import__(module), name)
+
+def digest_sources():
+    """The files a scan's results depend on besides the inputs: the Python of this folder, dm/tools and dm/games (shader_split.py and every module it can import:
+    romfs, unityfs, uepak, cpk, frostbite, smash_arc, profile_guess, game, nso, ...) and what the scan reads of the game's profile: game.tsv (the shader_* keys:
+    source groups, key skip; modules) and the profile's Python. Not its other tables: the split writes those (shader_map.tsv ...) or never reads them (README,
+    c1_full.tsv, cb_extent.tsv, the shader build's tables); shader_facts_manual.tsv is merged into the outputs after the scan"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    out = []
+    for d in (here, os.path.join(here, '../../tools'), os.path.join(here, '../../games')):
+        if os.path.isdir(d): out += [os.path.join(d, f) for f in sorted(os.listdir(d)) if f.endswith('.py')]
+    prof = str(GAME.dir)
+    out += [os.path.join(prof, f) for f in sorted(os.listdir(prof)) if f == 'game.tsv' or f.endswith('.py')]
+    return out
+
+def scan_digest(argv, jobs, sources=None):
+    """ScanCache's digest: the split's arguments and environment (with DM_PACKER_COMMIT, the app's commit on the phone), every job (with its file's size and
+    modification time) and the content of the tools and the profile (digest_sources)"""
+    h = hashlib.sha256()
+    h.update(repr((argv, [os.environ.get(k) for k in ('DM_GAME', 'DM_GLSLC_CAPTURE', 'DM_UE_SHADERS', 'DM_PACKER_COMMIT')])).encode())
+    for j in jobs:
+        try: st = os.stat(j[0]); t = (st.st_size, st.st_mtime_ns)
+        except OSError: t = None
+        h.update(repr((j, t)).encode())
+    for p in digest_sources() if sources is None else sources:
+        h.update(f'\0{os.path.basename(p)}\0'.encode())
+        with open(p, 'rb') as f: h.update(hashlib.sha256(f.read()).digest())
+    return h.hexdigest()
+
+def pooled(ex, jobs, total, start=0, chunk=1, cache=None):
     """scan_file over jobs in the pool, the results in job order, with a 'progress: <done>/<total>' line at most twice a second (the NSP script shows it as
-    the stage's count). The count is of the jobs finished in any order: counted in order it would stall behind one slow archive range while the others finish"""
-    batches = [jobs[i:i + chunk] for i in range(0, len(jobs), chunk)]
-    futures = {ex.submit(scan_batch, b): len(b) for b in batches}
-    done, pending, shown = start, set(futures), 0.0
-    while pending:
-        finished, pending = cf.wait(pending, timeout=0.5)
-        done += sum(futures[f] for f in finished)
-        if not pending or time.monotonic() - shown >= 0.5: print(f'progress: {done}/{total}', flush=True); shown = time.monotonic()
-    return [r for f in futures for r in f.result()]
+    the stage's count). The count is of the jobs finished in any order: counted in order it would stall behind one slow archive range while the others finish.
+    start is the index of the first job among all the split's jobs (the count's start and ScanCache's keys); batches the cache holds whole are not scanned again"""
+    cache = cache or ScanCache(None)
+    batches = [(start + i, jobs[i:i + chunk]) for i in range(0, len(jobs), chunk)]
+    kept = {first: r for first, b in batches if (r := cache.cached(first, len(b))) is not None}
+    done, shown = start + sum(len(r) for r in kept.values()), 0.0
+    if kept: print(f'progress: {done}/{total}', flush=True); shown = time.monotonic()
+    todo = [(first, b) for first, b in batches if first not in kept]
+    try:
+        if isinstance(ex, InProcess):
+            for first, b in todo:
+                kept[first] = r = scan_batch(b); cache.add(first, r); done += len(b)
+                if done == start + len(jobs) or time.monotonic() - shown >= 0.5: print(f'progress: {done}/{total}', flush=True); shown = time.monotonic()
+        else:
+            futures = {ex.submit(scan_batch, b): first for first, b in todo}
+            pending = set(futures)
+            while pending:   # a timed wait, not as_completed: the count is shown every half second even while one slow range is all that is left
+                finished, pending = cf.wait(pending, timeout=0.5, return_when=cf.FIRST_COMPLETED)
+                for f in finished:   # each result into the cache as it comes
+                    kept[futures[f]] = r = f.result(); cache.add(futures[f], r); done += len(r)
+                if not pending or time.monotonic() - shown >= 0.5: print(f'progress: {done}/{total}', flush=True); shown = time.monotonic()
+    finally:
+        cache.flush()   # also on an interrupt (KeyboardInterrupt): what finished is kept
+    return [r for first, _ in batches for r in kept[first]]
 
 
 def main():
@@ -2862,9 +3089,10 @@ def main():
     dlc_v = sys.argv[8].split(',') if len(sys.argv) > 8 and sys.argv[8] else []   # extra content has no ExeFS; each root is the extracted DLC index
     # Several versions (base game + update): the RomFS and main arguments are comma-separated and paired one to one; the output is their union (keys are content hashes, shaders shared by versions appear once).
     # The first version's source column is unchanged; later versions are prefixed with their workspace directory name (e.g. v327680): /v327680/Shader/…, main@v327680. They sort after the first version, so existing rows keep their package indices.
-    romfs_v, main_v = romfs_l.split(','), main_l.split(',')
+    romfs_v, main_v = [nup.default_romfs(r) for r in romfs_l.split(',')], main_l.split(',')
+    dlc_v = [nup.default_romfs(r) for r in dlc_v]
     if len(romfs_v) != len(main_v): red(f'{len(romfs_v)} RomFS and {len(main_v)} main: they must pair one to one')
-    files, results, common = [], [], None
+    files, results, common, dumps = [], [], None, []
     for i, (romfs, mainnso) in enumerate(zip(romfs_v, main_v)):
         tag = os.path.basename(os.path.dirname(os.path.abspath(romfs))) if i else ''
         files += sorted((os.path.join(dp, f), (tag + '/' if tag else '') + os.path.relpath(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs)
@@ -2889,6 +3117,9 @@ def main():
         if not names and glsl_sources(img) and 'glslcCompile' in main_imports(img) and glslc_module(os.path.dirname(os.path.abspath(mainnso))):
             print(f'[RED] main holds GLSL sources and imports glslcCompile, but there are no captured GLSLC outputs in {cap}: the shaders the game compiles at run time will have no translation (the NSP script checks an empty capture against the offline split)', flush=True)
         for nm in names: found += glslc_shaders(open(os.path.join(cap, nm), 'rb').read(), f'/glslc_capture/{nm}')
+        # Shaders the host saved because the map did not have them (DM_NVN_SHDUMP, nvn_dumps): <version dir>/nvn_shdump, or DM_NVN_SHDUMP_DIR. Taken last, after every
+        # file (below): a saved copy has only the control bytes the host keeps, so a shader a file also holds takes the file's copy
+        dumps += nvn_dumps(os.environ.get('DM_NVN_SHDUMP_DIR') or os.path.join(os.path.dirname(os.path.abspath(romfs)), 'nvn_shdump'))
         # Unreal Engine shader code archives decoded on the Mac (uepak.py): <version dir>/ue_shaders, or DM_UE_SHADERS; needed when the RomFS has Unreal paks
         ued = os.environ.get('DM_UE_SHADERS') or os.path.join(os.path.dirname(os.path.abspath(romfs)), 'ue_shaders')
         names = sorted(f for f in os.listdir(ued) if f.endswith('.ushaderbytecode') and not f.startswith('._')) if os.path.isdir(ued) else []   # AppleDouble metadata, not decoded shader archives
@@ -2919,7 +3150,7 @@ def main():
     files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in cras and p not in zips and p not in arhs and p not in fbs]
     with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
         n = len(big) + len(files)
-        results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)
+        results += pooled(ex, big, n, cache=cache) + pooled(ex, files, n, len(big), chunk=16, cache=cache)
     trees, defer = {}, []
     for rel, uniq, pr, extra in results:
         if extra == 'defer': defer.append(rel)
@@ -2929,10 +3160,14 @@ def main():
         import unityfs
         for k in unityfs.KNOWN_TREES: trees.setdefault(k, unityfs.known_tree(*k))
         byrel = {r: p for p, r in files}
-        with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, trees, zdicts)) as ex: again = list(ex.map(scan_file, [(byrel[r], r) for r in defer]))
+        with pool(J, common, trees, zdicts) as ex: again = list(ex.map(scan_file, [(byrel[r], r) for r in defer]))
         for rel, uniq, pr, extra in again:
             if extra == 'defer': red(f'{rel}: Unity serialized file without type trees, and no bundle has a Shader type tree of the same hash to borrow')
         results = [r for r in results if r[3] != 'defer'] + again
+    if dumps:
+        have = {k for _, uniq, _, _ in results for k in uniq}
+        dumps = [d for d in dumps if skey(d[2], d[3]) not in have]
+        results.append(('nvn_shdump', {skey(c, k): (w, st, c, k) for w, st, c, k in dumps}, var_pairs(dumps), {}))
     bad = [extra[1] for *_, extra in results if isinstance(extra, tuple)]
     if bad: print(f'[RED] {len(bad)} file(s) could not be read, their shaders are left out (first: {bad[0]})', flush=True)   # build_ipa_from_nsp.py reads this line
     per_src = collections.Counter(); pairs = set()
@@ -2943,6 +3178,7 @@ def main():
                 if not same_shader(keys[key][2:4], v[2:4]): red(f'key {key} is the same but the control section or code area differs ({v[0]} / {keys[key][0]})')
                 continue
             keys[key] = v; per_src[group(v[0])] += 1
+    mesh_pairs = {x for x in pairs if x[2:] in (('mesh',), ('task',))}; pairs -= mesh_pairs
     prog = {(a, b) for a, b, *t in pairs if t} - pairs; pairs = {x for x in pairs if len(x) == 2}
     sp, cover = separable_pairs(keys); pairs |= sp
     if cover: print(f'single-stage programs: {len({v for v, _ in sp}):,} vertex shaders are paired with a cover of {len(cover)} pixel shader(s) ({" ".join(cover)})')
@@ -2963,6 +3199,7 @@ def main():
             x, y, z = struct.unpack_from('<3I', ctl, at[0]); sh = struct.unpack_from('<I', ctl, at[1])[0]
             if not x * y * z: red(f'compute shader {key}: control +{at[0]:#x} thread group is 0 ({where})')
             facts[key] = {'local': [x, y, z], 'shared': (sh + 15) // 16 * 16}
+        if st in ('ts', 'ms'): facts[key] = mesh_facts(key, st, ctl, code, keys, mesh_pairs)
     for name, rr in recs.items():
         with open(os.path.join(pkg, name), 'wb') as f: f.write(b''.join(rr))
     with open(mapout, 'w') as f:

@@ -93,13 +93,18 @@ static int step_add(const key_step *st) {
     if (g_nsteps == g_cap_steps) { int cap = g_cap_steps ? g_cap_steps * 2 : 64; key_step *n = realloc(g_steps, (size_t)cap * sizeof *n); if (!n) return 0; g_steps = n; g_cap_steps = cap; }
     g_steps[g_nsteps++] = *st; return 1;
 }
+// dm_keys_stop: the remaining DM_KEYS steps are dropped (DM_MARK_KEYS_STOP=1: when DM_MARK_DRAWS sees its scene, hle_nvn.c), so presses that only had to get a run to its
+// test scene (DM_FASTBOOT's A every few frames through the menus) do not go on into it
+static _Atomic int g_keys_stop;
+void dm_keys_stop(void) { if (!atomic_exchange(&g_keys_stop, 1)) LOG("DM_KEYS: the remaining steps are dropped (the scene is reached)"); }
 static void *keys_main(void *arg) {
     // touching: the previous step handed its finger over to this one; released: the frame the previous step released in (a frame step presses in a later frame, so the game reads the
     // release between two presses even when the replay runs late and the next step is already due: two taps of A stay two presses, not one long one)
     (void)arg; struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0); int touching = 0; int64_t released = -1;
-    for (int i = 0; i < g_nsteps; i++) {
+    for (int i = 0; i < g_nsteps && !atomic_load(&g_keys_stop); i++) {
         const key_step *s = &g_steps[i];
-        for (;;) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); double el = (t.tv_sec - t0.tv_sec) + (t.tv_nsec - t0.tv_nsec) / 1e9;
+        for (;;) { if (atomic_load(&g_keys_stop)) return NULL;
+                   struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); double el = (t.tv_sec - t0.tv_sec) + (t.tv_nsec - t0.tv_nsec) / 1e9;
                    if (s->frame ? (double)dm_guest_frame() >= s->at && (int64_t)dm_guest_frame() > released : el >= s->at) break; usleep(5000); }
         LOG("DM_KEYS: %s%.2f press %#llx (hold %.2f %s)", s->frame ? "frame " : "", s->at, (unsigned long long)s->btn, s->hold, s->fhold ? "frames" : "s");
         if (s->tap) { dm_touch t = {0, s->tx, s->ty}; dm_touch_script(&t, 1); } else if (touching) dm_touch_script(NULL, 0);
@@ -122,6 +127,7 @@ static int g_sync_next, g_sync_held;   // the next step to press; whether g_step
 static int keys_framed(void) { for (int i = 0; i < g_nsteps; i++) if (!g_steps[i].frame || !g_steps[i].fhold) return 0; return g_nsteps > 0; }
 static void keys_sync(void) {
     if (!atomic_load_explicit(&g_sync_on, memory_order_acquire)) return;
+    if (atomic_load(&g_keys_stop)) { atomic_store(&g_sync_on, 0); script_set(0, 0, 0, 0, 0); dm_touch_script(NULL, 0); return; }
     pthread_mutex_lock(&g_sync_mu);
     uint64_t f = dm_guest_frame();
     for (;;) {
@@ -187,7 +193,7 @@ static void keys_parse(const char *spec) {
     // other, and a group listed after a long repeat waited for all of it. A stable sort keeps the listed order of steps at the same time; times and frame numbers are not comparable, so a list
     // that mixes them keeps its listed order
     int mixed = 0; for (int i = 1; i < g_nsteps; i++) mixed |= g_steps[i].frame != g_steps[0].frame;
-    if (!mixed && g_nsteps > 1) mergesort(g_steps, (size_t)g_nsteps, sizeof *g_steps, step_cmp);   // stable (BSD libc), and not quadratic for long interleaved repeats
+    if (!mixed && g_nsteps > 1) plat_sort_stable(g_steps, (size_t)g_nsteps, sizeof *g_steps, step_cmp);   // stable (BSD libc), and not quadratic for long interleaved repeats
 }
 // DM_KEYS=@<file>: the steps are read from the file (a DM_REC recording as it is). An environment value is capped by ARG_MAX (1 MiB for arguments and environment together on macOS,
 // about 40,000 recorded steps), and iOS's env.txt takes one line per switch; a relative path is from the working directory (Documents on iOS)
@@ -221,15 +227,26 @@ void hid_keys_init(void) {
 //   registered textures of that target (2 = 3D) with storage address and block-linear layout (nvn_mtl.m dm_gfx_texlist), "texraw <serial> <path>"
 //   saves a host texture's level 0 raw, every slice (a cube's six faces, a 3D texture's depth slices) (nvn_mtl.m dm_gfx_texraw), "drag <x0> <y0> <x1> <y1> [seconds=0.3]" moves one finger in a straight line between the two normalized picture
 //   points over that time and lifts it (the touch screen's pans and swipes, hle_touch.c gesture_sample), "dump" logs what each guest thread waits on and the graphics wait points
-//   (crash_dump_now, as the iOS app's DM_LOG_PORT dump; scripts/regress.py asks for it before stopping a hung game), "program <n>" makes oe::ExecuteProgram(n) with no parameters (a multi-program application's way between its programs, headless), "webshot <path>" saves the offline page shown as a PNG, "#…" is ignored.
-//   Look at a screen, decide, press, look again: menus whose timing moves from run to run (loading) need no blind timed script
+//   (crash_dump_now, as the iOS app's DM_LOG_PORT dump; scripts/regress.py asks for it before stopping a hung game), "fps <n>" sets the frame rate cap while the game runs
+//   (0 = the game's own, 15 to 60: hle_fpslock.c dm_fps_target_set), "program <n>" makes oe::ExecuteProgram(n) with no parameters, "#…" is ignored.
+//   Look at a screen, decide, press, look again: menus whose timing moves from run to run (loading) need no blind timed script.
+// On Android (the launcher sets DM_CTL=<app files>/ctl.txt, android/tools/nxctl.sh appends to it) the reader starts at the file's end, so a previous run's lines are not
+// replayed; "env" lines go to the replay (dm_gfx_ctl_env: applied at the next frame boundary, VKA_ENV switches read again), and the replay takes "capture <n>",
+// "screenshot [path]" and "stats" (dm_gfx_ctl, vka_ctl.c). A file that shrank (rewritten) is read again from its start
+#if defined(__ANDROID__)
+void dm_gfx_ctl_env(const char *key, const char *val); int dm_gfx_ctl(const char *line);
+#endif
 static void *ctl_main(void *arg) {
     const char *path = arg; long off = 0; char line[1100];
+#if defined(__ANDROID__)
+    { FILE *f = fopen(path, "r"); if (f) { if (!fseek(f, 0, SEEK_END)) off = ftell(f); fclose(f); } }
+#endif
     if (getenv("DM_PREV_PROGRAM")) {   // oe::ExecuteProgram started this program in the last one's place: that program acted on what the file holds
         FILE *f0 = fopen(path, "r"); if (f0) { if (!fseek(f0, 0, SEEK_END)) off = ftell(f0); fclose(f0); }
     }
     for (;;) {
         FILE *f = fopen(path, "r");
+        if (f && !fseek(f, 0, SEEK_END) && ftell(f) < off) off = 0;
         if (f && !fseek(f, off, SEEK_SET)) {
             while (fgets(line, sizeof line, f)) {
                 size_t n = strlen(line); if (!n || line[n - 1] != '\n') break;   // a line still being written: read it next time
@@ -246,7 +263,12 @@ static void *ctl_main(void *arg) {
                 if (!strncmp(line, "memdump ", 8)) { void dm_ctl_memdump(uint64_t a, uint64_t n, const char *path); char *e2, *e3; uint64_t a = strtoull(line + 8, &e2, 16), n = strtoull(e2, &e3, 0);
                                                      while (*e3 == ' ') e3++; dm_ctl_memdump(a, n, e3); continue; }
                 if (!strncmp(line, "cvari ", 6)) { void dm_ctl_cvar_i32(uint64_t off, int32_t v); char *e2; uint64_t off = strtoull(line + 6, &e2, 16); dm_ctl_cvar_i32(off, (int32_t)strtol(e2, NULL, 0)); continue; }
+                if (!strncmp(line, "fps ", 4)) { void dm_fps_target_set(int t, const char *src); dm_fps_target_set(atoi(line + 4), "DM_CTL fps"); LOG("DM_CTL: fps %d", atoi(line + 4)); continue; }
                 if (!strncmp(line, "cvarf ", 6)) { void dm_ctl_cvar_f32(uint64_t off, float v); char *e2; uint64_t off = strtoull(line + 6, &e2, 16); dm_ctl_cvar_f32(off, strtof(e2, NULL)); continue; }
+#if defined(__ANDROID__)
+                if (!strncmp(line, "env ", 4)) { char *eq = strchr(line + 4, '='); if (eq) { *eq = 0; dm_gfx_ctl_env(line + 4, eq + 1); } continue; }
+                if (dm_gfx_ctl(line)) continue;
+#endif
                 if (!strncmp(line, "env ", 4)) { char *eq = strchr(line + 4, '='); if (eq) { *eq = 0; setenv(line + 4, eq + 1, 1); LOG("DM_CTL: env %s=%s", line + 4, eq + 1); } continue; }
                 if (!strncmp(line, "texdump ", 8)) { void dm_gfx_texdump_next(const char *path); dm_gfx_texdump_next(line + 8); LOG("DM_CTL: colour targets of the next frame → %s (as DM_NVN_TEXDUMP)", line + 8); continue; }
                 if (!strncmp(line, "passdump ", 9)) { void dm_gfx_passdump_next(long n); dm_gfx_passdump_next(atol(line + 9)); LOG("DM_CTL: passes of the next %ld frames (as DM_NVN_PASSDUMP)", atol(line + 9)); continue; }

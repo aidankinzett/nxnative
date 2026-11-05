@@ -28,7 +28,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | 60 fps intervals and dynamic-resolution constants | frame rate | gap | checked: both releases' mains, where the host's rows for them were found | 2 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md); [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md) | the game's own constants; the Asian release's function is the global one's 0x13c0 further on, so one function-matched rule could serve both releases |
 | `build` → `game` | NieR's frame interval and dynamic-resolution floor at fixed addresses | frame rate | gap | checked: both releases' mains, where these rows were found | 2 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md); [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md) | the game's own display object; the Asian release's function is the global one's 0x13c0 further on, so the rewriter's function match could give the host both releases' addresses |
 | `build` → `host` | frame limiter wait: yield → sleep | power | gap | checked: Mac runs with the cut undone, 2026-10-26 (the game note) | 1 | [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) | without it the host's yield back-off (thr_yield) holds 59.7 to 59.8 fps, at 0.9 to 1.2 W of CPU against 0.14 to 0.42 W (2026-10-26): a back-off that reaches a yield-and-tick loop's deadline sooner would make the cut unnecessary for every game |
-| `game` → `host` | one vertex shader's visibility counter (VertexCounterLowering) | shaders | gap | judgement | — | [Program.cs:257](../../dm/gfx/tools/dmsh_xlate/Program.cs#L257) | a general lowering of subgroup ballots in vertex shaders would cover any shader that counts that way |
+| `game` → `host` | one vertex shader's visibility counter (VertexCounterLowering) | shaders | gap | judgement | — | [Program.cs:298](../../dm/gfx/tools/dmsh_xlate/Program.cs#L298) | a general lowering of subgroup ballots in vertex shaders would cover any shader that counts that way |
 | `build` → `engine` | Unity QualitySettings.vSyncCount held at 1 | frame rate | gap | judgement | 1 | [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md) | an IL2CPP player registers the setter by its icall name, so the place can be found in any Unity game; holding it at 1 stays this profile's choice (its logic steps by the count) |
 | `build` → `engine` | Unity's Application.targetFrameRate at a fixed address | frame rate | gap | judgement | 1 | [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) | an IL2CPP player registers the setter by its icall name, so the field can be found in any Unity game; whether to raise it stays the profile's |
 | `build` → `game` | frame limiter 30 → 60 fps and the 1/60 update step | frame rate | gap | judgement | 1 | [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) | the game's own limiter constant and fixed step |
@@ -49,6 +49,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `engine` | Frostbite's frame regulator at a fixed pointer | frame rate | blocked: one Frostbite game here | judgement | 1 | [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) | engine code other Frostbite games ship (the simulation's own rate is already set by name) |
 | `build` → `engine` | Next Level Games' frame limiter target at a fixed address | frame rate | blocked: one game on that engine here | judgement | 1 | [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md) | the studio's engine, which its other games ship |
 | `build` → `engine` | RE Engine's frame limit at a fixed pointer | frame rate | blocked: one RE Engine game here | judgement | 1 | [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) | engine code other RE Engine games ship |
+| `build` → `engine` | sead's dynamic interval controller floor behind a fixed global (the app object's framework) | frame rate | blocked: one game with this controller here | judgement | 1 | [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md) | sead's game framework code that other Nintendo EPD games ship, so the controller could be found by its code (the clamp to [+0, +4] and 60 / interval) instead of a fixed address |
 | `build` → `engine` | ThreadedStreamBuffer load-acquires | race | blocked: no game files of those games on the drive to compare | judgement | 1 | [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](../../dm/games/0100CE4010AAC000/README.md) | the race is in Unity 2018.4's ThreadedStreamBuffer, engine code other Unity games of that era ship (Cuphead, AI: THE SOMNIUM FILES, Raging Loop): a function-matched rule per Unity version |
 | `build` → `game` | 60 fps frame step (112 sites) | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md) | the game's own clock and timers (a community 60 fps mod on the host's frame step) |
 | `build` → `game` | 60 fps frame step and render scale | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [The Legend of Zelda: Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) | the game's own timing object |
@@ -66,6 +67,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [ASTRAL CHAIN](#astral-chain) | 0 | 0 | 112 | 0 | 0 | `build` → `game` |
 | [Batman: Arkham Knight](#batman-arkham-knight) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [Donkey Kong Bananza](#donkey-kong-bananza) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [EA SPORTS FC 27](#ea-sports-fc-27) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](#final-fantasy-crystal-chronicles-remastered-edition) | 8 | 0 | 0 | 0 | 0 | `build` → `engine` |
 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](#final-fantasy-tactics---the-ivalice-chronicles) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -260,7 +262,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0xc5ab8c`: queue pop: ldr x8, [x19] → dmb ishld (after the tail load; w8 = head)
   - cut `+0xc5ab94`: queue pop: ldr w9, [x19, #0x1c] (the head again) → and x9, x8, #0xffff
   - cut `+0xc5ab98`: queue pop: and x9, x9, #0xffff → ldr x8, [x19] (the ring; then ldr x8, [x8, x9, lsl #3]: the item)
-  - host [hle_uemalloc.c:41](../../dm/host/hle_uemalloc.c#L41): Unreal's allocator on a host malloc zone
+  - host [hle_uemalloc.c:40](../../dm/host/hle_uemalloc.c#L40): Unreal's allocator on a host malloc zone
 
 ### DARK SOULS: REMASTERED
 
@@ -272,6 +274,15 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x706fa4`: frame limiter target: mov w1,#30 → mov w1,#60 (main+0x707090 sleeps out 1000 / fps ms since the last frame)
   - cut `+0x667904`: frame update step: ldr s8,[x8,#0x6ec] (1/30) → ldr s8,[x8,#0x834] (1/60), passed to main+0x6a337c
 
+### Donkey Kong Bananza
+
+[Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md), `040074A01BF12000`.
+
+- **`build` → `engine`**, frame rate, blocked: one game with this controller here, judgement: sead's dynamic interval controller floor behind a fixed global (the app object's framework). Sead's game framework code that other Nintendo EPD games ship, so the controller could be found by its code (the clamp to [+0, +4] and 60 / interval) instead of a fixed address
+
+- **v458752 `main`** `e25c90c1…`
+  - host [hle_fpslock.c:40](../../dm/host/hle_fpslock.c#L40): engine frame limit set to fps_target: sead frame-rate controller minimum interval
+
 ### EA SPORTS FC 27
 
 [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), `0100C49025D3E000`.
@@ -279,7 +290,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `engine`**, frame rate, blocked: one Frostbite game here, judgement: Frostbite's frame regulator at a fixed pointer. Engine code other Frostbite games ship (the simulation's own rate is already set by name)
 
 - **1.8d.310c `main`** `a48c0de3…`
-  - host [hle_fpslock.c:52](../../dm/host/hle_fpslock.c#L52): engine frame limit set to fps_target: FIFA frame regulator
+  - host [hle_fpslock.c:67](../../dm/host/hle_fpslock.c#L67): engine frame limit set to fps_target: FIFA frame regulator
 
 ### FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition
 
@@ -355,7 +366,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `engine`**, frame rate, blocked: one game on that engine here, judgement: Next Level Games' frame limiter target at a fixed address. The studio's engine, which its other games ship
 
 - **1.4.0 `main`** `79e5950f…`
-  - host [hle_fpslock.c:37](../../dm/host/hle_fpslock.c#L37): engine frame limit set to fps_target: NLG frame limiter target
+  - host [hle_fpslock.c:52](../../dm/host/hle_fpslock.c#L52): engine frame limit set to fps_target: NLG frame limiter target
 
 ### Mario + Rabbids® Sparks of Hope
 
@@ -373,7 +384,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `engine`**, frame rate, blocked: one RE Engine game here, judgement: RE Engine's frame limit at a fixed pointer. Engine code other RE Engine games ship
 
 - **16.0.2 `main`** `c9a3dd77…`
-  - host [hle_fpslock.c:33](../../dm/host/hle_fpslock.c#L33): engine frame limit set to fps_target: RE Engine frame limit
+  - host [hle_fpslock.c:48](../../dm/host/hle_fpslock.c#L48): engine frame limit set to fps_target: RE Engine frame limit
 
 ### Need For Speed™ Hot Pursuit Remastered
 
@@ -384,11 +395,11 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **1.0.3 `main`** `799d1061…` ([patches.py:7](../../dm/games/010029B0118E8000/patches.py#L7))
   - cut `+0x4835a4`: frame limiter spin: b.gt main+0x483588 → nop (the host paces the frames)
-  - host [hle_fpslock.c:42](../../dm/host/hle_fpslock.c#L42): engine frame limit set to fps_target: Criterion 60 fps mode
-  - host [hle_fpslock.c:43](../../dm/host/hle_fpslock.c#L43): engine frame limit set to fps_target: Criterion frame ticks
-  - host [hle_fpslock.c:44](../../dm/host/hle_fpslock.c#L44): engine frame limit set to fps_target: Criterion frame ticks / 10
-  - host [hle_fpslock.c:45](../../dm/host/hle_fpslock.c#L45): engine frame limit set to fps_target: Criterion 2D game step
-  - host [hle_fpslock.c:46](../../dm/host/hle_fpslock.c#L46): engine frame limit set to fps_target: Criterion 3D game step
+  - host [hle_fpslock.c:57](../../dm/host/hle_fpslock.c#L57): engine frame limit set to fps_target: Criterion 60 fps mode
+  - host [hle_fpslock.c:58](../../dm/host/hle_fpslock.c#L58): engine frame limit set to fps_target: Criterion frame ticks
+  - host [hle_fpslock.c:59](../../dm/host/hle_fpslock.c#L59): engine frame limit set to fps_target: Criterion frame ticks / 10
+  - host [hle_fpslock.c:60](../../dm/host/hle_fpslock.c#L60): engine frame limit set to fps_target: Criterion 2D game step
+  - host [hle_fpslock.c:61](../../dm/host/hle_fpslock.c#L61): engine frame limit set to fps_target: Criterion 3D game step
 
 ### NieR:Automata The End of YoRHa Edition (010056B015FE8000)
 
@@ -407,7 +418,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x9bf4d4`: dynamic resolution: optimal frame cost 32.01 -> 16.005 ms at 60 fps (second load)
   - cut `+0x9bf4f8`: dynamic resolution: good frame cost 30 -> 15 ms at 60 fps
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:68](../../dm/host/hle_fpslock.c#L68): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:83](../../dm/host/hle_fpslock.c#L83): frame interval and dynamic-resolution floor
 
 ### NieR:Automata The End of YoRHa Edition (0100B8E016F76000)
 
@@ -426,7 +437,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x9c08e8`: dynamic resolution lower bound follows the selected preset
   - cut `+0x9c08f4`: dynamic resolution lower bound follows the selected preset
   - launcher capabilities: DYNAMIC_RESOLUTION
-  - host [hle_fpslock.c:69](../../dm/host/hle_fpslock.c#L69): frame interval and dynamic-resolution floor
+  - host [hle_fpslock.c:84](../../dm/host/hle_fpslock.c#L84): frame interval and dynamic-resolution floor
 
 ### Paper Mario: The Thousand-Year Door
 
@@ -445,7 +456,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`build` → `engine`**, frame rate, gap, judgement: Unity's Application.targetFrameRate at a fixed address. An IL2CPP player registers the setter by its icall name, so the field can be found in any Unity game; whether to raise it stays the profile's
 
 - **1.3.0 `main`** `94ceae32…`
-  - host [hle_fpslock.c:28](../../dm/host/hle_fpslock.c#L28): engine frame limit set to fps_target: Unity targetFrameRate
+  - host [hle_fpslock.c:43](../../dm/host/hle_fpslock.c#L43): engine frame limit set to fps_target: Unity targetFrameRate
 
 ### Subnautica
 
@@ -663,7 +674,7 @@ Applied to the `sdk` of any build without CUTS, found by function fingerprint ([
 
 ## Translator rules keyed by a shader's code
 
-- [Program.cs:257](../../dm/gfx/tools/dmsh_xlate/Program.cs#L257): Tears of the Kingdom 1.4.3 visibility counter (one vertex shader, exact code SHA-256 below) (**`game` → `host`**, gap: a general lowering of subgroup ballots in vertex shaders would cover any shader that counts that way)
+- [Program.cs:298](../../dm/gfx/tools/dmsh_xlate/Program.cs#L298): Tears of the Kingdom 1.4.3 visibility counter (one vertex shader, exact code SHA-256 below) (**`game` → `host`**, gap: a general lowering of subgroup ballots in vertex shaders would cover any shader that counts that way)
 
 ## Profile switches
 

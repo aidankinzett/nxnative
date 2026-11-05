@@ -8,9 +8,17 @@
 //   Job: [{ "key", "stage": "vs|ps|cs", "code": machine code file (graphics = 0x50-byte SPH + instructions, compute = instructions),
 //           "arch": "sm86" for Ampere code (NVN2, Switch 2: a 0x80-byte SPH and 128-bit instructions; absent = Maxwell),
 //           "tex": { "slot": "2d|2darray|cube|cubearray|3d|buffer|1d|1darray|2dms|2dmsarray", ... }, "img": { "slot": { "type", "fmt" } },
-//           "attr": { "location": "float|sint|uint" }, "fout": { "target": "float|sint|uint" }, "local": [x, y, z] }]
-//   Output: <key>.spv and <key>.res.json (offsets of storage buffer slots in c0, etc.; decoding texture handle → slot number is done in the script that builds the metallib;
-//           "fetch1d": the texture slots read by 1D integer fetches translated as wrapped 2D reads, see RecordTexelFetch1D)
+//           "attr": { "location": "float|sint|uint" }, "fout": { "target": "float|sint|uint" }, "local": [x, y, z],
+//           Android Vulkan only (absent for Apple): "subgroup_size": n, "ssbo_align": bytes, "gs_passthrough": false, "shared_max": bytes,
+//           Switch 2 task / mesh programs (Android Vulkan): "stage": "ts|ms", "arch": "sm86", "code" the code area with its 0x80-byte SPH (as a graphics stage's) cut to
+//           the instruction length, "local": [threads, 1, 1] (control +0x58), "mesh": [max vertices, max primitives, payload bytes, per-vertex plane codes ...
+//           (0-3 position x y z w, 4 + 4 g + c generic g component c: the SPH's output map in order), and optionally -1, per-primitive value codes ... (all the
+//           values the program writes, in order, -3 for one no output takes: their count is the stride of a 32-primitive chunk), and
+//           optionally -2, generic locations to declare as (0, 0, 0, 1) per-vertex outputs ...] (task: [0, 0, payload bytes]), "gl_depth_spec": SpecId (mesh, optional:
+//           the GL depth rewrite under a bool specialization constant). Translated as compute and emitted as a TaskEXT / MeshEXT entry point (Ryujinx
+//           StructuredIr/MeshShaderInfo.cs, CodeGen/Spirv/SpirvMeshEntry.cs) }]
+//   Output: <key>.spv and <key>.res.json (offsets of storage buffer slots in c0, etc.; a mesh program's "mesh": its output locations, per vertex and per primitive; decoding texture handle → slot number is done in the script that builds the metallib;
+//           "shared_spill": {"bytes", "workgroup"} when the shared memory moved to a storage buffer (job shared_max); "fetch1d": the texture slots read by 1D integer fetches translated as wrapped 2D reads, see RecordTexelFetch1D)
 using Ryujinx.Common.Memory;
 using Ryujinx.Graphics.Shader;
 using Ryujinx.Graphics.Shader.Translation;
@@ -148,7 +156,23 @@ static class SwshXlate
         public bool QueryGeometryInputFixed() => _job["geometry_topology"] != null;
         // Compute lowering must emit passthrough vertices explicitly: Metal
         // cannot supply the native NV geometry-passthrough stage afterwards.
-        public bool QueryHostSupportsGeometryShaderPassthrough() => _job["geometry_topology"] == null;
+        // Job gs_passthrough = false (the Android Vulkan build, vk_android_build.py): the device has no SPV_NV_geometry_shader_passthrough, so the shader writes its vertices itself
+        public bool QueryHostSupportsGeometryShaderPassthrough() => _job["geometry_topology"] == null && !(_job["gs_passthrough"] is JsonNode gp && !(bool)gp);
+        // Host answers only the Android Vulkan build sets (vk_android_build.py; android/SHADERS.md); a job without them gets Ryujinx's defaults, which the Apple libraries are built with.
+        // Job subgroup_size: the device's fixed subgroup size (Adreno: 64). Maxwell code assumes 32-lane warps; with 64 Ryujinx splits ballots, masks and shuffles into 32-lane halves (InstEmitWarp, HelperFunctionManager)
+        // Job shared_max: the device's maxComputeSharedMemorySize (DMSH_VK_SHARED_MAX). A compute program declaring more keeps its shared memory in a storage buffer, a slice per
+        // workgroup (Ryujinx StructuredIr/SharedSpillInfo.cs); unset, no limit (Apple: dmsh_build.py shared_spill moves threadgroup arrays in the Metal source instead)
+        // A task / mesh program's layout (job "mesh", see the file header) and its GL depth constant
+        public int[] QueryMeshShaderLayout() => _job["mesh"] is JsonArray m ? m.Select(v => (int)v).ToArray() : null;
+        public int QueryMeshShaderGlDepthSpecId() => _job["gl_depth_spec"] is JsonNode n ? (int)n : -1;
+        public int QueryHostComputeSharedMemoryMax() => _job["shared_max"] is JsonNode sm ? (int)sm : 0;
+        public (int Slice, int Workgroup)? SharedSpill;   // the res.json's "shared_spill": {"bytes": a workgroup's slice, "workgroup": bytes left in workgroup memory}
+        public void RecordSharedSpill(int sliceBytes, int workgroupBytes) => SharedSpill = (sliceBytes, workgroupBytes);
+        public int QueryHostSubgroupSize() => _job["subgroup_size"] is JsonNode sg ? (int)sg : 32;
+        // Job ssbo_align: the device's storage buffer offset alignment. Set, the host binds each storage buffer at its address rounded down to it, and the shader adds the
+        // difference (GlobalToStorage: offset = address − (base & −align)); unset, a storage buffer starts exactly at its c0 address
+        public bool QueryHasUnalignedStorageBuffer() => _job["ssbo_align"] != null;
+        public int QueryHostStorageBufferOffsetAlignment() => _job["ssbo_align"] is JsonNode al ? (int)al : 16;
         public GpuGraphicsState QueryGraphicsState()
         {
             Array32<AttributeType> attr = default; Array8<AttributeType> fout = default;
@@ -180,6 +204,21 @@ static class SwshXlate
         return false;
     }
 
+    // A mesh program's outputs as the translator declares them (MeshShaderInfo): the generic locations per vertex (Location g, vec4[max vertices]) and per primitive
+    // (Location g, PerPrimitiveEXT, vec4[max primitives])
+    static JsonObject MeshOutputs(int[] layout)
+    {
+        int prim = Array.IndexOf(layout, -1, 3), pad = Array.IndexOf(layout, -2, 3);
+        int planeEnd = prim >= 0 ? prim : pad >= 0 ? pad : layout.Length, primEnd = pad >= 0 ? pad : layout.Length;
+        var vertex = layout[3..planeEnd].Where(c => c >= 4).Select(c => (c - 4) >> 2).Concat(pad >= 0 ? layout[(pad + 1)..] : Array.Empty<int>()).Distinct().OrderBy(g => g);
+        var primitive = prim >= 0 ? layout[(prim + 1)..primEnd].Where(c => c >= 4).Select(c => (c - 4) >> 2).Distinct().OrderBy(g => g) : Enumerable.Empty<int>();
+        return new JsonObject
+        {
+            ["max_vertices"] = layout[0], ["max_primitives"] = layout[1],
+            ["vertex_locations"] = new JsonArray(vertex.Select(g => (JsonNode)g).ToArray()), ["primitive_locations"] = new JsonArray(primitive.Select(g => (JsonNode)g).ToArray()),
+        };
+    }
+
     static int Main(string[] args)
     {
         if (args.Length == 1 && args[0] == "--source-sha")   // first 16 digits of the sha256 of the embedded Program.cs + csproj (same convention as dmsh_chain.py)
@@ -199,7 +238,7 @@ static class SwshXlate
                 byte[] code = File.ReadAllBytes((string)job["code"]);
                 var acc = new Accessor(code, job);
                 // Job debug = false: turn off DebugMode (DebugMode skips the AST optimizer and the output is full of temporaries; semantics unchanged)
-                var flags = TranslationFlags.MetalImageAtomics | (job["debug"] is JsonNode dbg && !(bool)dbg ? 0 : TranslationFlags.DebugMode) | ((string)job["stage"] == "cs" ? TranslationFlags.Compute : 0) | ((string)job["arch"] == "sm86" ? TranslationFlags.Ampere : 0);
+                var flags = TranslationFlags.MetalImageAtomics | (job["debug"] is JsonNode dbg && !(bool)dbg ? 0 : TranslationFlags.DebugMode) | ((string)job["stage"] switch { "cs" => TranslationFlags.Compute, "ts" => TranslationFlags.Compute | TranslationFlags.TaskShader, "ms" => TranslationFlags.Compute | TranslationFlags.MeshShader, _ => 0 }) | ((string)job["arch"] == "sm86" ? TranslationFlags.Ampere : 0);
                 var ctx = Translator.CreateContext(0, acc, new TranslationOptions(TargetLanguage.Spirv, TargetApi.Vulkan, flags));
                 bool geometry = job["geometry_topology"] != null;
                 ShaderProgram p = ctx.Translate(geometry);
@@ -232,10 +271,12 @@ static class SwshXlate
                     ["geometry_stride"] = geometry ? ctx.GetResourceReservations().OutputSizePerInvocation : 0,
                     ["uses_frag_coord"] = p.Info.UsesFragCoord, ["frag_out_map"] = p.Info.FragmentOutputMap,
                 };
+                if ((string)job["stage"] == "ms") res["mesh"] = MeshOutputs(job["mesh"].AsArray().Select(v => (int)v).ToArray());
                 foreach (var b in p.Info.CBuffers) res["cbufs"].AsArray().Add(new JsonObject { ["binding"] = b.Binding, ["slot"] = b.Slot });
                 foreach (var b in p.Info.SBuffers) res["sbufs"].AsArray().Add(new JsonObject { ["binding"] = b.Binding, ["slot"] = b.Slot, ["cb_slot"] = b.SbCbSlot, ["cb_offset"] = b.SbCbOffset, ["flags"] = (int)b.Flags });
                 foreach (var (list, name) in new[] { (p.Info.Textures, "textures"), (p.Info.Images, "images") })
                     foreach (var t in list) res[name].AsArray().Add(new JsonObject { ["binding"] = t.Binding, ["type"] = (int)t.Type, ["format"] = t.Format.ToString(), ["cbuf_slot"] = t.CbufSlot, ["handle"] = t.HandleIndex, ["array"] = t.ArrayLength, ["separate"] = t.Separate, ["flags"] = (int)t.Flags });
+                if (acc.SharedSpill is (int slice, int wg)) res["shared_spill"] = new JsonObject { ["bytes"] = slice, ["workgroup"] = wg };
                 if (acc.Fetch1D.Count > 0) { var f1 = new JsonArray(); foreach (int h in acc.Fetch1D) f1.Add(h); res["fetch1d"] = f1; }
                 File.WriteAllText(Path.Combine(outDir, key + ".res.json"), res.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
                 ok++;

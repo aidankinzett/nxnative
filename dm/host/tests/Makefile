@@ -67,6 +67,12 @@ run: $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture 
 	TMPDIR="$(abspath $(B))" $(B)/t_cheats $(QUIET)
 	$(B)/t_nro
 	$(B)/t_symbols
+	$(B)/t_android_av
+	$(B)/t_android_input
+	$(B)/t_android_shlib
+	$(B)/t_android_imgmem
+	$(B)/t_android_zshare
+	$(B)/t_android_place
 run: $(B)/t_nro
 run: $(B)/t_symbols
 $(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h $(GAME_H) | $(B)
@@ -117,8 +123,14 @@ $(B)/t_gesture: t_gesture.c ../hle_touch.c ../front.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_gesture.c ../hle_touch.c
 $(B)/t_thread_leak: t_thread_leak.c ../thread.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_thread_leak.c
-$(B)/t_fs: t_fs.c t_fs_stub.c ../hle_fs.c ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_fs.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
+# zstd's decompressor for the NUP container tests (nup_image.h, built with DM_NUP_ZSTD as the Android host is; the Mac host is built without it)
+$(B)/zstddec.o: ../../third_party/zstd/zstddeclib.c | $(B)
+	$(CLANG) -O2 -w -c -o $@ $<
+$(B)/t_fs: t_fs.c t_fs_stub.c ../hle_fs.c ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h ../nup_image.h nup_fixture_zst.h $(B)/zstddec.o $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wno-unused-function -DDM_NUP_ZSTD -I.. $(GINC) -o $@ t_fs.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c $(B)/zstddec.o
+# Manual check of the NUP reader against a real dump (not in run): build/t_nup_dump <file>.nup:<selector> <RomFS folder>
+$(B)/t_nup_dump: t_nup_dump.c t_fs_stub.c ../hle_fs.c ../save_sync.c ../hle_bigstack.c ../nup_image.h ../romfs_image.h $(B)/zstddec.o $(GAME_H) | $(B)
+	$(CLANG) -O2 -Wno-unused-function -DDM_NUP_ZSTD -I.. $(GINC) -o $@ t_nup_dump.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c $(B)/zstddec.o
 # Inject only the folder handle allocation; directory I/O remains real.
 $(B)/t_fs_directory: t_fs_directory.c t_fs_stub.c ../hle_fs.c ../romfs_image.h ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_fs_directory.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
@@ -358,3 +370,27 @@ coverage:
 	rm -rf $(B)/cov/prof
 	LLVM_PROFILE_FILE="$(call cov_profile,$(B)/cov)" $(MAKE) -i B=$(B)/cov SAN="$(COV_FLAGS)" run
 	@$(call cov_export,$(B)/cov)
+# The Android host's pure parts (dm/host/android): resampler, channel map, SPS size, MediaCodec picture layouts; gamepad / touch / sensor mapping
+run: $(B)/t_android_av $(B)/t_android_input $(B)/t_android_shlib $(B)/t_android_spvpatch $(B)/t_android_imgmem $(B)/t_android_zshare $(B)/t_android_place
+$(B)/t_android_av: t_android_av.c ../android/av_android.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_av.c
+$(B)/t_android_input: t_android_input.c ../android/input_map.c ../android/input_map.h ../motion_fusion.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_input.c
+# The Android Vulkan replay's shader library reader and binding walker (dm/gfx/vk_android/vka_shlib.c, vka_bind.c) with the vendored zstd decoder; DM_VK_SHLIB=<dmsh_vk.lib> adds the real library
+VKA = ../../gfx/vk_android
+$(B)/zstddeclib.o: ../../third_party/zstd/zstddeclib.c | $(B)
+	$(CLANG) -O2 -w -c -o $@ $<
+$(B)/t_android_shlib: t_android_shlib.c $(VKA)/vka_shlib.c $(VKA)/vka_shlib.h $(VKA)/vka_bind.c $(VKA)/vka_bind.h ../../gfx/nvn/dmsh_abi_vk.h ../../gfx/nvn/dmsh_abi.h $(B)/zstddeclib.o | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_shlib.c $(VKA)/vka_shlib.c $(VKA)/vka_bind.c $(B)/zstddeclib.o
+# The image memory blocks' extent allocator (vka_extents.h, vka_imgmem.c)
+$(B)/t_android_imgmem: t_android_imgmem.c $(VKA)/vka_extents.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_imgmem.c
+# Zero-shared image memory's bookkeeping (vka_zshare.h; vka_imgmem.c vka_imem_bind_zero, vka_tex.c img_own)
+$(B)/t_android_zshare: t_android_zshare.c $(VKA)/vka_zshare.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_zshare.c
+# Large memory pools placed by parts: the range arithmetic (vka_place.h; vka_mem.c mtl_pool_need)
+$(B)/t_android_place: t_android_place.c $(VKA)/vka_place.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_place.c
+# The replay's SPIR-V rewrite of integer-fed vertex inputs (vka_spvpatch.c): the selftest's vertex shader, validated by spirv-val when it is on the PATH; DM_VK_SPV_DIR=<.spv folder> adds those modules
+$(B)/t_android_spvpatch: t_android_spvpatch.c $(VKA)/vka_spvpatch.c $(VKA)/vka_spvpatch.h $(VKA)/vka_selftest_spv.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_android_spvpatch.c $(VKA)/vka_spvpatch.c

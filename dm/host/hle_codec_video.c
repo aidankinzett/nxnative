@@ -516,6 +516,7 @@ HLE_FORCE("_ZN2nn5codec3sdk34MakeDecodeImagePreferenceForCompatEttNS0_24VideoDec
 }
 // The host's sync handles signal when their buffer holds the picture of that release; a handle the host did not make (another nn::gs user) reads as signalled
 static bool sync_reached(const cv_sync *s) {
+    if (s->magic == DM_SYNC_NEVER) return false;   // GameChat's camera pictures: no camera (hle_misc.c)
     if (s->magic != CV_SYNC) { static int once; if (!once++ && (s->magic || s->dec)) LOG("[RED] nn::codec: a sync handle the host did not make (%#x): signalled", s->magic); return true; }
     if (!s->gen) return true;
     pthread_mutex_lock(&g_cv_mu);   // held until the decoder's lock is: FinalizeVp9Decoder cannot free it in between

@@ -106,3 +106,7 @@
 #define DMSH_TG_SLOT 30
 #define DMSH_TG_MAX 0x8000
 #define DMSH_TG_GROUPS 512
+// Android Vulkan only: a compute program's shared memory past the device's limit (job shared_max), reserved under the same slot at offset 2 (Ryujinx GlobalToStorage.SharedSpillCbOffset,
+// StructuredIr/SharedSpillInfo.cs): one slice per workgroup (dmsh_abi_vk.h DMSH_VK_KIND_SHARED_SPILL). The Apple build never sets shared_max (dmsh_build.py shared_spill instead)
+#define DMSH_KIND_SHARED_SPILL "shared_spill"
+#define DMSH_SHARED_SPILL_CB_OFFSET 2

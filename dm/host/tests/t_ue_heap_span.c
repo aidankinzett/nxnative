@@ -11,7 +11,7 @@ void gate_obs_set(int id, void (*callback)(uint64_t *, int)) { (void)id; (void)c
 int main(void) {
     enum { span = 65536, count = 16 };
     uint8_t *blocks[count];
-    g_zone = malloc_create_zone(0, 0);
+    g_zone = plat_zone_create("t_ue_heap_span");
     assert(g_zone);
     for (unsigned i = 0; i < count; ++i) {
         blocks[i] = m_Malloc(NULL, span + (i % 2) * 4096, (i % 4 < 2) ? 4096 : 0);
@@ -45,11 +45,10 @@ int main(void) {
         large[kept - 1] = 0x77;
         uint8_t *less = m_Realloc(NULL, large, kept, alignment);
         assert(((uintptr_t)less & (span - 1)) == 0 && less[kept - 1] == 0x77);
-        assert(malloc_size(less) < big);
+        assert(plat_malloc_size(less) < big);
         m_Free(NULL, less);
     }
     assert(atomic_load(&g_used) == 0);
-    malloc_destroy_zone(g_zone);
     puts("Unreal virtual-span alignment and realloc contents passed");
     return 0;
 }

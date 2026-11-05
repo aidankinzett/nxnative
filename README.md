@@ -1,3 +1,99 @@
+# Banana Native
+
+Play your own copies of **Donkey Kong Bananza** and **Mario Kart World** natively on Android.
+
+It is not an emulator: the game's own code runs directly on the phone's CPU, with the Switch 2 graphics rebuilt on Vulkan. Banana Native is the Android port of [nxnative](https://github.com/seedds/nxnative) by seedds. Nothing from any game is in this repository or in the app, and the project is not affiliated with Nintendo, any game publisher, nxnative or Eden.
+
+> [!CAUTION]
+> Only download the app from this page's **Releases**. Copies elsewhere are not made by me.
+
+> [!IMPORTANT]
+> AI disclaimer: most of the Android port was written with an AI coding assistant (Claude), then tested by hand on one phone. It is experimental and has bugs.
+
+## Games
+
+| Game | Version | Status |
+|---|---|---|
+| Donkey Kong Bananza | update 458752 | Plays |
+| Mario Kart World | 1.8.0 | Experimental: gets in game and drives, with graphics problems (see known issues) |
+
+Other versions are refused with a message that says which version the app needs.
+
+## What you need
+
+- Android 13 or newer, a 64-bit phone. A Snapdragon phone (Adreno GPU) with 12-16 GB of RAM; tested only on a Snapdragon 8 Elite Gen 5 (Adreno 840) with 16 GB.
+- Your own game, dumped as a folder. No keys or firmware; NSP and XCI files do not work for Switch 2 games. Mario Kart World 1.8.0 is a dump with `base/` only.
+  ```
+  Switch2/
+    DonkeyKongBananza/
+      base/                  the game (exefs/, romfs/)
+      updates/<version>/     its update (exefs/, romfs/), if any
+      dlc/<title id>/<n>/    extra content, if any
+  ```
+- About 1 GB free on the phone for the prepared game (the dump itself is read in place); preparing on the phone needs 2 GB more while it runs.
+- Optional: your own `Lossless.dll` from Lossless Scaling for Windows, for frame generation (not included).
+
+## How to start
+
+Each game is prepared once: its code is rewritten for Android and its shaders are translated for Vulkan. A Mac does it in about 10-15 minutes; the phone can do it by itself, but that takes about an hour per game.
+
+### On a Mac (recommended)
+
+1. Install the [.NET 10 SDK](https://dotnet.microsoft.com/download) (`brew install --cask dotnet-sdk`) and [micromamba](https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html), and clone this repository.
+2. Make the environment, once (put it on a drive with a few GB free):
+   ```sh
+   micromamba create -p ~/bananative-env -f android/environment.yml
+   ```
+3. Prepare the game from your dump folder (the one with `base/`):
+   ```sh
+   ~/bananative-env/bin/python scripts/pack_android.py /path/to/Switch2/DonkeyKongBananza
+   ```
+   It writes the pack to `/path/to/Switch2/040074A01BF12000-work/android-pack` (about 250-400 MB), next to the dump.
+4. Copy the game folder to the phone, for example to `Switch2/DonkeyKongBananza`, and the pack next to it as `Switch2/040074A01BF12000-work/android-pack` (only `android-pack`: the rest of the `-work` folder stays on the Mac).
+5. Install the APK from **Releases**, open **Banana Native**, allow **All files access**, tap **Add game** and pick the game folder. The app finds the pack next to it: tap **Play**.
+
+### On the phone only
+
+Donkey Kong Bananza only for now: preparing Mario Kart World on the phone runs out of memory in the code rewrite (fix planned for the next version), so prepare it on a Mac.
+
+1. Copy your dump folder to the phone (for example `Switch2/DonkeyKongBananza`).
+2. Install the APK from **Releases**, open **Banana Native** and allow **All files access**.
+3. **Add game**, pick the game folder, and tap **Prepare**. It runs in the background with a notification and can be paused; keep the phone charging. Nothing is uploaded.
+4. Tap **Play** when it is done.
+
+Settings (the gear) › **Readiness check** tells you what your phone is missing, with a button to fix most items.
+
+Saves and prepared packs are in the app's own storage (`Android/data/<app>/files/saves` and `packs`). When you uninstall, Android asks whether to keep that data. A game's ⋯ menu backs saves up to `Switch2/save-backups/<title ID>/` (kept when the app is uninstalled) and restores them, and exports or imports the pack as one .zip. A save from version 0.1.0 or older, in `Switch2/saves/<title ID>/`, is copied into the app at the game's next start; that folder is left as it was.
+
+## Features
+
+- **Frame generation (LSFG):** Lossless Scaling's frame generation is built in: 2x, 3x or 4x, or a target of 60 / 90 / 120 fps. It needs your own `Lossless.dll` (put it in `Download/` or pick it in Settings › Frame generation).
+- **Foldable phones:** the on-screen controls keep one layout per screen (outer and inner) and switch when you fold or unfold, with no restart. On a square inner screen the picture can sit at the top with the controls below it.
+- On-screen controls with a layout editor, gamepads, a frame-rate cap (the game's own, 60, 30, 20, 15), the game resolution (phone 1080p or the game's own), save backups, pause on return, and a performance overlay (fps, GPU time, throttling, battery).
+
+## Known issues
+
+- Mario Kart World: prepare it on a Mac (on the phone its code rewrite runs out of memory). Some road and ground textures may be missing and trees can flicker. Memory is tight on 16 GB phones.
+- The phone gets hot, and the frame rate drops when it throttles. Let it cool down.
+- A new version of the app can need its shaders made again (the app says so and offers Prepare); a pack from an older version is not used yet.
+- Tested on one phone only.
+
+## Building
+
+See [android/README.md](android/README.md). Releases are built with `-PnxLive=true` and the release key (never in this repository).
+
+## Credits and licence
+
+Built on **[nxnative](https://github.com/seedds/nxnative)** by seedds (MIT) and everything it credits below. Mario Kart World findings from [kartnative](https://github.com/pahorema/kartnative) (pahorema) and [switch2mac](https://github.com/azmasm/switch2mac) (azmasm); task and mesh shader lowering from [Eglantine](https://github.com/djihads80/eglantine) via switch2mac; frame generation ported from [Eden](https://git.eden-emu.dev/eden-emu/eden) and [lsfg-vk](https://github.com/PancakeTAS/lsfg-vk).
+
+The Android app is **GPL-3.0-or-later** as a whole ([android/NOTICE.md](android/NOTICE.md)); each release is built from its tagged commit. nxnative's own files keep their MIT licence.
+
+Only use games you own. Don't ask for games, keys or dumps.
+
+---
+
+*nxnative's own README follows.*
+
 # nxnative
 
 Play your own Nintendo Switch games natively on iPhone and iPad. Bring your game (its NSP files) and your `prod.keys`; one script turns them into an IPA that you sideload.
@@ -11,7 +107,7 @@ Switch 2 games have started too: [Donkey Kong Bananza](dm/games/040074A01BF12000
 This project is built on other people's work ([licenses](dm/third_party/README.md)):
 
 - **[d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile)** (MIT) developed this native-execution approach, for Diablo II: Resurrected. nxnative started as a copy of its generic parts: the NSO rewriter, the host that stands in for Horizon, the NVN-on-Metal layer and the iOS app shell. Fixes go both ways.
-- **Ryujinx** (MIT): its shader translator (`Ryujinx.Graphics.Shader`, `Ryujinx.Common` and `Spv.Generator` 1.3.2, in `dm/third_party/ryujinx` with a few fixes listed in [its README](dm/third_party/ryujinx/README.md)) turns the games' shaders into SPIR-V. Its emulation of the kernel and system services is also a reference when the host's behaviour is in doubt.
+- **Ryujinx** (MIT): its shader translator (`Ryujinx.Graphics.Shader`, `Ryujinx.Common` and `Spv.Generator` 1.3.2, in `dm/third_party/ryujinx` with a few fixes listed in [its README](dm/third_party/ryujinx/README.md)) turns the games' shaders into SPIR-V; its Switch 2 task / mesh support is after [switch2mac](https://github.com/azmasm/switch2mac) (azmasm), with one GPL-3.0-or-later file from [Eglantine](https://github.com/djihads80/eglantine) (Eden Emulator Project), which makes the built translator GPL-3.0-or-later as a whole ([its README](dm/third_party/ryujinx/README.md)). Its emulation of the kernel and system services is also a reference when the host's behaviour is in doubt.
 - **[Atmosphère](https://github.com/Atmosphere-NX/Atmosphere)**: its kernel, mesosphère, is the reference for Horizon's synchronization semantics (address arbiter, condition variables).
 - **[LibHac](https://github.com/Thealexbarney/LibHac)**: reads NSPs and layers updates over the base game in `dm/tools/nx_extract`.
 - **[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)**: SPIR-V to Metal Shading Language.
@@ -353,4 +449,4 @@ Under a game, "60 fps with 1.2.0" means it runs at 60 fps (30 on the console) wi
 
 ### License
 
-MIT ([LICENSE](LICENSE)). Third-party code keeps its own license ([dm/third_party](dm/third_party/README.md)).
+MIT ([LICENSE](LICENSE)). Third-party code keeps its own license ([dm/third_party](dm/third_party/README.md)); two parts are GPL-3.0-or-later, and so is what is built with them: the shader translator ([dm/third_party/ryujinx](dm/third_party/ryujinx/README.md)) and Android's frame generation ([android/NOTICE.md](android/NOTICE.md)).

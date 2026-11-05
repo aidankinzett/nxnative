@@ -599,6 +599,7 @@ void mtl_pool_add(const void *mem, uint64_t size) {
     pthread_mutex_unlock(&g_mu);
 }
 
+void mtl_pool_need(const void *addr, uint64_t len, const char *why) { (void)addr; (void)len; (void)why; }   // every pool is a buffer from mtl_pool_add on (the Vulkan replay places pools lazily)
 static void big_moved(int i) {   // caller holds g_mu: entry i has a new index
     const pool_ent *e = &g_pools[i];
     for (int k = 0; k < g_nbig; k++) { big_pool *b = &g_big[k]; if (b->mem != e->key) continue;
@@ -4837,6 +4838,7 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
             // DM_NVN_SHDUMP=directory: shaders missing from the map are saved as <key>.ctl (the control section's key bytes) and <key>.code (code area, nvn_ctl_lens), to trace their source / add them to the map offline
             static const char *shd; static int shd_init; if (!shd_init) { shd = getenv("DM_NVN_SHDUMP"); shd_init = 1; if (shd && *shd) mkdir(shd, 0777); }   // create the dump folder: a missing one made every fopen fail silently
             if (shd) { char path[1024]; FILE *f; uint32_t ncode, nctl; nvn_ctl_lens(p->sd[i].control, &nctl, &ncode);   // with SHDUMP set the control section is the host's copy
+                if (nctl == 0x48) nctl = 0xd8;   // NVN2 (nvn_ctl_lens gives its key's 0x48 bytes): the whole 0xd8-byte section, as the split needs its stage byte (+0x56) and thread group (+0x58) (shader_split.py nvn_dumps); hle_nvn.c's copy holds it
                 snprintf(path, sizeof path, "%s/%s.ctl", shd, k.UTF8String); if ((f = fopen(path, "wb"))) { fwrite(p->sd[i].control, 1, nctl, f); fclose(f); }
                 snprintf(path, sizeof path, "%s/%s.code", shd, k.UTF8String);
                 if (p->sd[i].data && ncode && ncode < (1u << 24) && (f = fopen(path, "wb"))) { fwrite((const void *)(uintptr_t)p->sd[i].data, 1, ncode, f); fclose(f); } }
